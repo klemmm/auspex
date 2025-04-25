@@ -1,0 +1,4 @@
+miasm>=0.1.2
+numpy>=1.19.0
+pytest>=6.0.0
+graphviz>=0.16 
