@@ -257,7 +257,7 @@ class KSetsDomain(object):
 
     def read(self, concrete_addr: Address, nbytes: int) -> AbstractValue:
         """Read a value from memory."""
-        if nbytes == 4:
+        if nbytes == TRACKED_DATA_SIZE:
             return self.mem.get(concrete_addr, TOP)
         else:
             return TOP
