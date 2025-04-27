@@ -44,6 +44,7 @@ class Interpreter:
         self.seen_write_location = set()
         self.address_score = {}
         self.instr_state = {}
+        self.instr_disasm = {}  # Store disassembly for each instruction
 
         # Initialize analysis state
         self.abstract_states: Dict[StateKey, domain.KSetsDomain] = {}
@@ -81,6 +82,8 @@ class Interpreter:
         if self.state_split and input_state is not TOP and len(input_state) == 1:
             if assignment.instr.offset not in self.instr_state:
                 self.instr_state[assignment.instr.offset] = set()
+                # Store the disassembly for this instruction
+                self.instr_disasm[assignment.instr.offset] = str(assignment.instr)
             self.instr_state[assignment.instr.offset].add(next(iter(input_state)))
 
 
@@ -234,15 +237,58 @@ class Interpreter:
         with open(output_path, "w") as f:
             f.write("digraph finite_state_machine {\n")
             f.write("    rankdir=LR;\n")
-            f.write("    node [shape = circle];\n")
+            f.write("    node [shape=none, fontname=\"Courier\"];\n")
+            f.write("    edge [fontname=\"Courier\"];\n")
 
+            # First, create a mapping of states to their unique instructions
+            state_to_instrs = {}
+            for instr_offset, states in self.instr_state.items():
+                if len(states) == 1:  # Only include instructions that map to exactly one state
+                    state = next(iter(states))
+                    state_to_instrs.setdefault(hex(state), []).append(instr_offset)
+            
+            # Sort instructions by address for each state
+            for state in state_to_instrs:
+                state_to_instrs[state].sort()
+
+            # Find the maximum line width
+            max_width = 0
+            for state in state_to_instrs:
+                for addr in state_to_instrs[state]:
+                    line = f"0x{hex(addr)[2:].zfill(8)}: {self.instr_disasm[addr]}"
+                    max_width = max(max_width, len(line))
+
+            # Write edges
             for source in self.state_graph:
                 for target in self.state_graph[source]:
                     f.write(f'    "{source}" -> "{target}";\n')
 
-            # Add terminal states with double circles
+            def create_html_label(state, instrs):
+                html = ['<']
+                html.append('<TABLE CELLBORDER="0" CELLSPACING="0">')
+                html.append(f'<TR><TD COLSPAN="2" ALIGN="CENTER"><B>{state}</B></TD></TR>')
+                for addr in instrs:
+                    addr_str = f"0x{hex(addr)[2:].zfill(8)}"
+                    disasm = self.instr_disasm[addr]
+                    html.append(f'<TR><TD ALIGN="RIGHT">{addr_str}:</TD><TD ALIGN="LEFT">{disasm}</TD></TR>')
+                html.append('</TABLE>')
+                html.append('>')
+                return ''.join(html)
+
+            # Write nodes with instruction information
+            for state in self.state_graph:
+                instrs = state_to_instrs.get(state, [])
+                label = create_html_label(state, instrs)
+                f.write(f'    "{state}" [label={label}];\n')
+
+            # Add terminal states with double rectangles
             for terminal_state in self.terminal_states:
-                f.write(f'    "{terminal_state}" [shape=doublecircle];\n')
+                instrs = state_to_instrs.get(terminal_state, [])
+                label = create_html_label(terminal_state, instrs)
+                f.write(f'    "{terminal_state}" [label={label}, peripheries=1];\n')
+
+            # Add START node with empty instruction lists
+            f.write(f'    "START" [label={create_html_label("START", [])}];\n')
 
             f.write("}\n")
         logging.info("Graph written successfully")
@@ -274,9 +320,6 @@ def main() -> None:
         logging.info("Doing analysis pass 2/2")
         interpreter.prepare(True)
         interpreter.run()
-        for instr_offset in interpreter.instr_state:
-            if len(interpreter.instr_state[instr_offset]) == 1:
-                print("Instruction " + hex(instr_offset) + " maps to state: " + hex(next(iter(interpreter.instr_state[instr_offset]))))
         interpreter.write_output(output_path)
         logging.info("Analysis completed successfully")
     except Exception as e:
