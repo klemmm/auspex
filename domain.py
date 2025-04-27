@@ -330,6 +330,7 @@ class KSetsDomain(object):
                     
                     total_size += arg_size
                 result = BITS_TO_NUMPY_TYPE[total_size](result)
+                return result
             return self.lift(handle_compose, None, expr.args)  
         elif isinstance(expr, ExprLoc):
             return KSetsDomain._abstract(expr.loc_key)
