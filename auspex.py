@@ -236,9 +236,11 @@ class Interpreter:
         logging.info("Writing state transition graph to %s", output_path)
         with open(output_path, "w") as f:
             f.write("digraph finite_state_machine {\n")
-            f.write("    rankdir=LR;\n")
+            f.write("    rankdir=TB;\n")  # Changed from LR to TB for top-to-bottom layout
             f.write("    node [shape=none, fontname=\"Courier\"];\n")
             f.write("    edge [fontname=\"Courier\"];\n")
+            f.write("    nodesep=0.5;\n")  # Add some horizontal spacing between nodes
+            f.write("    ranksep=0.5;\n")  # Add some vertical spacing between ranks
 
             # First, create a mapping of states to their unique instructions
             state_to_instrs = {}
@@ -290,6 +292,8 @@ class Interpreter:
             # Add START node with empty instruction lists
             f.write(f'    "START" [label={create_html_label("START", [])}];\n')
 
+            # Add rank constraints to help balance the layout
+            f.write('    { rank=same; "START" }\n')
             f.write("}\n")
         logging.info("Graph written successfully")
 
