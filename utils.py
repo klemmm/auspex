@@ -71,13 +71,6 @@ def update_dict(abs_dict: Union[AbsRegDict, AbsMemDict], key: Union[Address, Exp
         abs_dict[key] = abs_val
 
 # Type conversion mappings
-NUMPY_TO_STRUCT_FMT = {
-    np.uint8: 'B',
-    np.uint16: 'H',
-    np.uint32: 'I',
-    np.uint64: 'Q'
-}
-
 BITS_TO_NUMPY_TYPE = {
     8: np.uint8,
     16: np.uint16,

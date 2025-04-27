@@ -376,7 +376,7 @@ class KSetsDomain(object):
         update_dict(self.reg, ExprId("IRDst", 64), TOP) #don't care about IRDst except after a jump
         logging.debug("Instruction: %s", ir.instr)
         if "CALL" in str(ir.instr):
-            logging.warning("CALL not implemented yet")            
+            #logging.warning("CALL not implemented yet")            
             return set()
         logging.debug("IR statements:")
         for dst, src in ir.items():

@@ -26,7 +26,7 @@ Abstract interpretation is a static analysis technique that approximates program
 
 ### K-Sets Domain
 The k-sets domain is an abstract domain that tracks sets of concrete values, with a maximum size limit (k). It provides a lattice structure where:
-- TOP (None) represents all possible values
+- TOP represents all possible values
 - Sets represent specific sets of possible values
 - BOTTOM (empty set) represents no possible values
 
