@@ -363,7 +363,7 @@ class KSetsDomain(object):
         """Check if a location is incompatible with this domain."""
         return ExprId("IRDst", 64) in self.reg and concrete_loc is not None and concrete_loc not in KSetsDomain._concretize(self.reg[ExprId("IRDst", 64)]) 
                
-    def update(self, ir: IRBlock) -> Set[Address]:
+    def update(self, ir: AssignBlock) -> Set[Address]:
         """
         Update this domain with an IR statement.
         

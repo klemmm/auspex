@@ -3,7 +3,7 @@ import sys
 import logging
 from typing import Dict, Set, List, Tuple, Optional, Union, Callable
 import domain
-from miasm.ir.ir import IRBlock
+from miasm.ir.ir import AssignBlock
 from miasm.expression.expression import LocKey
 from miasm.analysis.machine import Machine
 from miasm.analysis.binary import Container
@@ -43,6 +43,7 @@ class Interpreter:
         self.state_split = state_split
         self.seen_write_location = set()
         self.address_score = {}
+        self.instr_state = {}
 
         # Initialize analysis state
         self.abstract_states: Dict[StateKey, domain.KSetsDomain] = {}
@@ -75,6 +76,14 @@ class Interpreter:
         self.ir_cfg = lifter.new_ircfg_from_asmcfg(asm_cfg)
         self.entry_block = self.ir_cfg.get_block(entry_loc).loc_key
 
+    def _update_instr_state(self, assignment: AssignBlock, input_state: AbstractValue):
+        """Update the instruction-to-state mapping"""
+        if self.state_split and input_state is not TOP and len(input_state) == 1:
+            if assignment.instr.offset not in self.instr_state:
+                self.instr_state[assignment.instr.offset] = set()
+            self.instr_state[assignment.instr.offset].add(next(iter(input_state)))
+
+
     def _process_block(self, current_block: LocKey, abs_state: domain.KSetsDomain) -> StateTransition:
         """Process a single block and track dispatch state changes.
         
@@ -89,7 +98,7 @@ class Interpreter:
         block_offset = self.loc_db.get_location_offset(current_block)
         
         logging.debug("\nProcessing block at %s (address: %s)", 
-                     current_block, hex(block_offset) if block_offset is not None else hex(0))
+                     current_block, hex(block_offset) if block_offset is not None else "<synthetic block>")
         
         # Read input dispatch state
         input_state: AbstractValue = abs_state.read(self.dispatch_state_addr, TRACKED_DATA_SIZE) if self.state_split else TOP 
@@ -99,6 +108,8 @@ class Interpreter:
             
         # Process all assignments in the block        
         for assignment in ir_block.assignblks:
+            self._update_instr_state(assignment, input_state)
+
             strongly_updated_addrs = abs_state.update(assignment)
             for addr in strongly_updated_addrs:
                 if (current_block.key, addr) not in self.seen_write_location:
@@ -263,6 +274,9 @@ def main() -> None:
         logging.info("Doing analysis pass 2/2")
         interpreter.prepare(True)
         interpreter.run()
+        for instr_offset in interpreter.instr_state:
+            if len(interpreter.instr_state[instr_offset]) == 1:
+                print("Instruction " + hex(instr_offset) + " maps to state: " + hex(next(iter(interpreter.instr_state[instr_offset]))))
         interpreter.write_output(output_path)
         logging.info("Analysis completed successfully")
     except Exception as e:
