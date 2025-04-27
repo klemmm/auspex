@@ -154,6 +154,7 @@ class KSetsDomain(object):
                 'CC_U>': lambda concrete_args: not(concrete_args[0] or concrete_args[1]), 
                 'CC_S<': lambda concrete_args: concrete_args[0] != concrete_args[1], 
                 'CC_U<=': lambda concrete_args: concrete_args[0] or concrete_args[1],
+                'CC_U<': lambda concrete_args: concrete_args[0],
 
                 'FLAG_EQ_CMP': lambda concrete_args: concrete_args[0] == concrete_args[1],
 
