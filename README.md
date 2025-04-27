@@ -46,6 +46,12 @@ A key feature of this implementation is its ability to maintain separate abstrac
 - This allows precise analysis of program behavior under different conditions
 - The state splitting mechanism is crucial for handling conditional branches and state-dependent behavior
 
+### Detecting original code blocks and associating them to dispatcher state values
+
+For each instruction, the associated abstract states are checked, if the abstract state contains only one possible dispatcher state value, then the instruction is considered belonging to original code, and matched to the corresponding dispatcher state value.
+
+The obfuscation/dispatcher instructions usually corresponds to multiple dispatcher state values, and therefore are not considered original code instructions.
+
 ## Installation
 
 1. Clone the repository:
@@ -76,11 +82,41 @@ This will:
 - Load and analyze the specified binary
 - Track dispatch state transitions
 - Handle loops and recursion without concrete execution
-- Generate a DOT file showing the state transition graph
+- Detect instructions beloging to each dispatcher state by using the abstract interpretation results
+- Generate a DOT file showing the state transition graph along with instructions for each node
 - You can visualize the graph using Graphviz:
 ```bash
 dot -Tpng graph.dot -o graph.png
 ```
+
+## Example results 
+
+### Example source code
+
+```c
+int main(int argc, char **argv) {
+    unsigned int i;
+    unsigned int ret = 0;
+    for (i = 0; i < argc; i++) {
+        if (argv[i][0] != 0) {
+            ret++;
+        }
+    }
+    return ret;
+}
+```
+
+### Example flattened CFG
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/klemmm/auspex/refs/heads/main/examples/example-flattened.png" alt="example CFG unflattened"/>
+</p>
+
+### Example unflattened CFG
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/klemmm/auspex/refs/heads/main/examples/example.png" alt="example CFG unflattened"/>
+</p>
 
 ## Configuration
 
@@ -104,7 +140,7 @@ Run the test suite:
 python -m pytest tests/
 ```
 
-## Limitations
+## Limitations / TODO
 
 This is an educational/PoC tool, it has limitations such as: 
 - Not all IR instructions are handled
@@ -112,6 +148,9 @@ This is an educational/PoC tool, it has limitations such as:
 - The dispatcher state address detection heuristic is simple and may not handle all cases
 - The abstract domain is quite simple (not relational) although it suffices for now 
 - No support for stuff like opaque predicates, etc. 
+- Should order instructions in nodes based on flow control instead of naive address ascending order
+- Should add an optimization pass to remove useless instructions (e.g. managing dispatcher state) from the final result
+- Supports only *one* level of flattening / dispatcher state variable for now.
 
 ## Contributing
 
