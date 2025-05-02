@@ -138,10 +138,15 @@ class KSetsDomain(object):
         return bool(((a ^ b) & sign_mask != 0) and ((res ^ a) & sign_mask != 0))
 
     @staticmethod
+    def _cast_signed(val):
+        return val.view(np.dtype(f"int{val.dtype.itemsize*8}"))
+
+    @staticmethod
     def _get_op_handlers() -> Dict[str, Callable]:
         """Get the operation handlers for this domain."""
         return {
                 '+': lambda concrete_args: concrete_args[0] + concrete_args[1],
+                '*': lambda concrete_args: concrete_args[0] * concrete_args[1],
                 '-': lambda concrete_args: concrete_args[0] - concrete_args[1] if len(concrete_args) == 2 else -concrete_args[0],
                 '&': lambda concrete_args: concrete_args[0] & concrete_args[1],
                 '|': lambda concrete_args: concrete_args[0] | concrete_args[1],
@@ -166,6 +171,7 @@ class KSetsDomain(object):
 
                 'parity': lambda concrete_args: bin(concrete_args[0]).count('1') % 2 == 1, 
                 'zeroExt_64': lambda concrete_args: np.uint64(concrete_args[0]),
+                'signExt_64': lambda concrete_args: np.uint64(KSetsDomain._cast_signed(concrete_args[0])),
         }   
 
     # ===== Private helper functions =====
@@ -314,7 +320,9 @@ class KSetsDomain(object):
                 return (int(sliced), stop - start)                
             
             return self.lift(handle_slice, (expr.start, expr.stop), [expr.arg])
-        elif isinstance(expr, ExprInt):                            
+        elif isinstance(expr, ExprInt): 
+            if expr.size == 1:
+                return KSetsDomain._abstract([False, True][expr.arg])
             return KSetsDomain._abstract(BITS_TO_NUMPY_TYPE[expr.size](expr.arg))
         elif isinstance(expr, ExprCompose):
             def handle_compose(_, to_compose: List[Set[Value]]) -> AbstractValue:   
