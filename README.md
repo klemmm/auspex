@@ -42,7 +42,7 @@ The dispatch state address is guessed by a simple heuristic (the address that is
 ### State Splitting
 A key feature of this implementation is its ability to maintain separate abstract states for different dispatch values. When the analysis encounters a branch or state change:
 - It creates a new abstract state for each possible dispatch value
-- These states are tracked independently through the program
+- These abstract states are tracked independently through the program
 - This allows precise analysis of program behavior under different conditions
 - The state splitting mechanism is crucial for handling conditional branches and state-dependent behavior
 
