@@ -19,7 +19,7 @@ ESTIMATOR_RATIO = 1.001
 MEM_WEIGHT = 0.5
 
 # Show on the CFG instructions that matches up to MAX_STATE_PER_INST states
-MAX_STATE_PER_INST = 2
+MAX_STATE_PER_INST = 1
 
 #log configuration
 LOG_LEVEL = logging.INFO

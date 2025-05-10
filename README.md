@@ -140,6 +140,14 @@ Run the test suite:
 python -m pytest tests/
 ```
 
+## Future works: towards handling de-virtualization
+
+Running AUSPEX on a simple VM program (`examples/vm.c`) successfully detects the VIP address and recover the control flow of program emulated in the VM (note: modifying `MAX_STATE_PER_INST` to 2 in `config.py` is required): 
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/klemmm/auspex/refs/heads/main/examples/vm.png" alt="example VM graph"/>
+</p>
+
 ## Limitations / TODO
 
 This is an educational/PoC tool, it has limitations such as: 
