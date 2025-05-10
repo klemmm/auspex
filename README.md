@@ -37,7 +37,7 @@ The analysis tracks how dispatch states (values at a specific memory address) ch
 - The analysis terminates even with unbounded loops
 - Results are valid for all possible inputs
 
-The dispatch state address is guessed by a preliminary analysis pass by detecting the variable that correlates the most with the path taken in each iteration.
+The dispatch state address is guessed by a preliminary analysis pass by detecting the variable that correlates the most with the path taken in each iteration. Heuristics parameters are configurable in `config.py`
 
 ### State Splitting
 A key feature of this implementation is its ability to maintain separate abstract states for different dispatch values. When the analysis encounters a branch or state change:
@@ -48,7 +48,7 @@ A key feature of this implementation is its ability to maintain separate abstrac
 
 ### Detecting original code blocks and associating them to dispatcher state values
 
-For each instruction, the associated abstract states are checked, if the abstract state contains only one possible dispatcher state value, then the instruction is considered belonging to original code, and matched to the corresponding dispatcher state value.
+For each basic block, the associated abstract states are checked, if the abstract state contains only few (threshold configurable) possible dispatcher state value, then the instruction is considered belonging to original code, and matched to the corresponding dispatcher state value.
 
 The obfuscation/dispatcher instructions usually corresponds to multiple dispatcher state values, and therefore are not considered original code instructions.
 
@@ -147,7 +147,6 @@ This is an educational/PoC tool, it has limitations such as:
 - Inter-procedural analysis is not done
 - The abstract domain is quite simple (not relational) although it suffices for now 
 - No support for stuff like opaque predicates, etc. 
-- Should order instructions in nodes based on flow control instead of naive address ascending order
 - Should add an optimization pass to remove useless instructions (e.g. managing dispatcher state) from the final result
 - Should ensure soundness for memory write with non-static addresses (needs a more powerful analysis, VSA / intervals / ...)
 - Should handle better CFG construction (i.e. dynamic branches)
