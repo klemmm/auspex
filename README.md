@@ -21,7 +21,7 @@ The project implements an abstract interpreter that:
 Abstract interpretation is a static analysis technique that approximates program behavior by executing the program on abstract values rather than concrete ones. This provides several key advantages:
 
 - **Soundness**: The analysis is guaranteed to cover all possible program behaviors - no execution path can be "missed"
-- **Termination**: The analysis is guaranteed to terminate, even for programs with unbounded loops
+- **Termination**: The analysis is guaranteed to terminate, even for programs with unbounded loops, as long as the dispatch state detection is successful
 - **Efficiency**: The analysis does not need to explicitely trace each path
 
 ### K-Sets Domain
@@ -37,7 +37,7 @@ The analysis tracks how dispatch states (values at a specific memory address) ch
 - The analysis terminates even with unbounded loops
 - Results are valid for all possible inputs
 
-The dispatch state address is guessed by a simple heuristic (the address that is written from the most code locations) performed in a preliminary analysis pass.
+The dispatch state address is guessed by a preliminary analysis pass by detecting the variable that correlates the most with the path taken in each iteration.
 
 ### State Splitting
 A key feature of this implementation is its ability to maintain separate abstract states for different dispatch values. When the analysis encounters a branch or state change:
@@ -145,11 +145,13 @@ python -m pytest tests/
 This is an educational/PoC tool, it has limitations such as: 
 - Not all IR instructions are handled
 - Inter-procedural analysis is not done
-- The dispatcher state address detection heuristic is simple and may not handle all cases
 - The abstract domain is quite simple (not relational) although it suffices for now 
 - No support for stuff like opaque predicates, etc. 
 - Should order instructions in nodes based on flow control instead of naive address ascending order
 - Should add an optimization pass to remove useless instructions (e.g. managing dispatcher state) from the final result
+- Should ensure soundness for memory write with non-static addresses (needs a more powerful analysis, VSA / intervals / ...)
+- Should handle better CFG construction (i.e. dynamic branches)
+- Contents from .data/.rodata should be taken into account in initial abstract state
 - Supports only *one* level of flattening / dispatcher state variable for now.
 
 ## Contributing

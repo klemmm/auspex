@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import logging
-from typing import Dict, Set, List, Tuple, Optional, Union, Callable
+import time
+from typing import Dict, Set, List, Tuple, Optional
 import domain
 from miasm.ir.ir import AssignBlock
 from miasm.expression.expression import LocKey
@@ -9,10 +10,11 @@ from miasm.analysis.machine import Machine
 from miasm.analysis.binary import Container
 from miasm.core.locationdb import LocationDB
 import traceback
-
-from config import LOG_LEVEL, LOG_FORMAT, TRACKED_DATA_SIZE
+from config import LOG_LEVEL, LOG_FORMAT, TRACKED_DATA_SIZE, ESTIMATOR_RATIO, MAX_STATE_PER_INST
+from utils import TOP, Address, Value, AbstractValue
+from estimator import estimate, Path
 import numpy as np
-from utils import TOP, Address, Value, AbstractValue, AbstractAddress
+from immutabledict import immutabledict
 
 # Type aliases for better readability
 DispatchState = Optional[Value]  # None represents TOP
@@ -37,23 +39,48 @@ class Interpreter:
         self._load_binary(binary_path, function_name)
 
         self.domain_class = domain.KSetsDomain
+        self.dispatch_state_addr = None
+        self.seeing = set()
+        self.seen = set()
+        self.loops = set()
+        self._detect_loops(self.entry_block)
 
+    def _detect_loops(self, root):
+        if root in self.seen:
+            return
+        if root in self.seeing:
+            self.loops.add(root)
+            return
+        self.seeing.add(root)
+        for succ_block in self.ir_cfg.successors_iter(root):
+            self._detect_loops(succ_block)
+        self.seeing.remove(root)
+        self.seen.add(root)
+            
     def prepare(self, state_split: bool) -> None:
         # Dispatch state management
         self.state_split = state_split
-        self.seen_write_location = set()
-        self.address_score = {}
-        self.instr_state = {}
-        self.instr_disasm = {}  # Store disassembly for each instruction
+        self.node_state = {}
+        self.loop_header = next(iter(self.loops))
+        self.trace = None
+        self.samples = []
+        self.best = None
+        self.best_2nd = None
+        self.best_addr = None
+        self.best_2nd_addr = None        
+        self.common_vars = None
 
         # Initialize analysis state
         self.abstract_states: Dict[StateKey, domain.KSetsDomain] = {}
         self.worklist: List[Tuple[LocKey, DispatchState]] = [(self.entry_block, TOP)]
         self.abstract_states[(self.entry_block.key, TOP)] = self.domain_class(False)
+        self.current_iter = -1
+        self.iter_freshness = {}
         
         # Initialize graph structures
         self.state_graph: Graph = {}
-        self.terminal_states: Set[str] = set()        
+        self.splitted_graph: Graph = {}
+        self.terminal_states: Set[str] = set()   
 
     def _load_binary(self, binary_path: str, function_name: str) -> None:
         """Load and prepare the binary for analysis.
@@ -72,19 +99,17 @@ class Interpreter:
         entry_offset = self.loc_db.get_location_offset(entry_loc)
         if entry_loc is None:
             raise ValueError(f"Function {function_name} not found in binary")        
-        asm_cfg = disasm_engine.dis_multiblock(entry_offset)
+        self.asm_cfg = disasm_engine.dis_multiblock(entry_offset)
         lifter = machine.lifter_model_call(self.loc_db)
-        self.ir_cfg = lifter.new_ircfg_from_asmcfg(asm_cfg)
+        self.ir_cfg = lifter.new_ircfg_from_asmcfg(self.asm_cfg)
         self.entry_block = self.ir_cfg.get_block(entry_loc).loc_key
 
-    def _update_instr_state(self, assignment: AssignBlock, input_state: AbstractValue):
+    def _update_node_state(self, node: LocKey, input_state: AbstractValue):
         """Update the instruction-to-state mapping"""
         if self.state_split and input_state is not TOP and len(input_state) == 1:
-            if assignment.instr.offset not in self.instr_state:
-                self.instr_state[assignment.instr.offset] = set()
-                # Store the disassembly for this instruction
-                self.instr_disasm[assignment.instr.offset] = str(assignment.instr)
-            self.instr_state[assignment.instr.offset].add(next(iter(input_state)))
+            if node.key not in self.node_state:
+                self.node_state[node.key] = set()
+            self.node_state[node.key].add(next(iter(input_state)))
 
 
     def _process_block(self, current_block: LocKey, abs_state: domain.KSetsDomain) -> StateTransition:
@@ -99,25 +124,23 @@ class Interpreter:
         """
         ir_block = self.ir_cfg.get_block(current_block)
         block_offset = self.loc_db.get_location_offset(current_block)
+
+        if current_block == self.loop_header:
+            self.current_iter += 1
         
         logging.debug("\nProcessing block at %s (address: %s)", 
                      current_block, hex(block_offset) if block_offset is not None else "<synthetic block>")
         
         # Read input dispatch state
-        input_state: AbstractValue = abs_state.read(self.dispatch_state_addr, TRACKED_DATA_SIZE) if self.state_split else TOP 
+        input_state: AbstractValue = abs_state.read(self.dispatch_state_addr, TRACKED_DATA_SIZE) if self.state_split else TOP         
 
         logging.debug("Input dispatch state: %s", 
                      str([hex(val) for val in input_state]) if input_state is not TOP else "TOP")
             
+        self._update_node_state(current_block, input_state)
         # Process all assignments in the block        
-        for assignment in ir_block.assignblks:
-            self._update_instr_state(assignment, input_state)
-
-            strongly_updated_addrs = abs_state.update(assignment)
-            for addr in strongly_updated_addrs:
-                if (current_block.key, addr) not in self.seen_write_location:
-                    self.seen_write_location.add((current_block.key, addr))                    
-                    self.address_score[addr] = self.address_score.get(addr, 0) + 1
+        for assignment in ir_block.assignblks:            
+            abs_state.update(assignment)
                  
         # Read output dispatch state
         output_state: AbstractValue = abs_state.read(self.dispatch_state_addr, TRACKED_DATA_SIZE) if self.state_split else TOP
@@ -152,18 +175,22 @@ class Interpreter:
                     if target_state != source_state:  # Avoid self-loops
                         self.state_graph.setdefault(hex(source_state), set()).add(hex(target_state))
 
-    def _process_successors(self, current_block: LocKey, abs_state: domain.KSetsDomain, output_state: AbstractValue) -> None:
+    def _process_successors(self, current_block: LocKey, abs_state: domain.KSetsDomain, input_state: AbstractValue, output_state: AbstractValue) -> None:
         """Process all successor blocks of the current location.
         
         Args:
             current_block: Current block being processed
             abs_state: Current abstract state
+            input_state: Input dispatch state of current block
             output_state: Output dispatch state from current block
         """
+        cur_offset = self.loc_db.get_location_offset(current_block)
+        cur_addr_str = hex(cur_offset) if cur_offset is not None else "<synthetic block>"          
         successor_count: int = 0
         for succ_block in self.ir_cfg.successors_iter(current_block):
             succ_offset = self.loc_db.get_location_offset(succ_block)
             succ_addr_str = hex(succ_offset) if succ_offset is not None else "<synthetic block>"
+          
             logging.debug("Exploring edge: %s -> %s (address: %s)", 
                          current_block, succ_block, succ_addr_str)
             
@@ -174,9 +201,14 @@ class Interpreter:
             # Process each possible dispatch state
             possible_states: List[DispatchState] = [None] if output_state is TOP else output_state
             for next_state in possible_states:
+                source = (current_block, next(iter(input_state)) if input_state is not None else None)                
+                sink = (succ_block, next_state)
+                if source not in self.splitted_graph:
+                    self.splitted_graph[source] = set()
+                self.splitted_graph[source].add(sink)
                 self._process_successor_state(succ_block, abs_state, next_state, succ_addr_str)
                 successor_count += 1
-                
+
         logging.debug("Processed %d successor states", successor_count)
 
     def _process_successor_state(self, succ_block: LocKey, abs_state: domain.KSetsDomain, 
@@ -198,7 +230,9 @@ class Interpreter:
         # Check if we need to update the successor's state
         state_key = (succ_block.key, next_state)
         if state_key in self.abstract_states:
-            succ_state.join(self.abstract_states[state_key])
+            if self.state_split or (succ_block != self.loop_header and self.iter_freshness.get(succ_block.key, -1) == self.current_iter):
+                succ_state.join(self.abstract_states[state_key])
+            self.iter_freshness[succ_block.key] = self.current_iter
             
         if state_key not in self.abstract_states or not succ_state.equals(self.abstract_states[state_key]):
             self.abstract_states[state_key] = succ_state
@@ -209,23 +243,138 @@ class Interpreter:
             logging.debug("Skipping already processed state %s at %s", 
                          hex(next_state) if next_state is not None else "TOP", succ_addr_str)
 
+    def _record_trace(self, current_block: LocKey, abs_state: domain.KSetsDomain) -> None:
+        """Record trace during pass 1 to guess state-split criterion"""
+        if self.trace is not None:
+            self.trace["path"].append((current_block.key, immutabledict(abs_state.get_static_vars())))
+        if self.loop_header == current_block:
+            if self.trace is not None:
+                vars = set(self.trace["mem"].keys())
+                if self.common_vars is None:
+                    self.common_vars = vars
+                else:
+                    self.common_vars = self.common_vars.intersection(vars)    
+                
+                # Enable score-caching by path reference
+                self.trace["path"] = Path(self.trace["path"])
+                self.samples.append(immutabledict(self.trace))                          
+            self.trace = {
+                "path": []
+            }   
+
+            self.trace["mem"] = immutabledict(abs_state.get_static_vars())
+
+    def _estimate(self) -> bool:
+        """Estimate the state-split address, returns True if estimation is stable"""
+        t = estimate(self.samples, self.common_vars)
+        if t is not None:
+
+            (self.best, self.best_addr), (self.best_2nd, self.best_2nd_addr) = t
+            candidate = None
+            if self.best is not None and self.best_2nd != 0.0 and (self.best == 0.0 or (self.best_2nd / self.best) > ESTIMATOR_RATIO):            
+                candidate = self.best_addr            
+            
+            decision = self.dispatch_state_addr is not None and candidate is not None and self.dispatch_state_addr == candidate
+            self.dispatch_state_addr = candidate
+            return decision
+           
     def run(self) -> None:
         """Run the analysis until all reachable states are processed."""
         logging.info("Starting analysis...")
         steps = 0
         while self.worklist:
             steps += 1
-            current_block, current_state = self.worklist.pop()
+            current_block, current_state = self.worklist.pop()            
             abs_state = self.abstract_states.get((current_block.key, current_state), self.domain_class(True)).clone()
-            
+
+            if not self.state_split:
+                self._record_trace(current_block, abs_state)     
+                if self.loop_header == current_block:
+                    if self._estimate():
+                        break
+          
             input_state, output_state = self._process_block(current_block, abs_state)
             
             if output_state != input_state:
                 self._update_state_graph(input_state, output_state)
-                
+            
             if not abs_state.is_bot:
-                self._process_successors(current_block, abs_state, output_state)
+                self._process_successors(current_block, abs_state, input_state, output_state)
         logging.info("Abstract interpretation converged in " + str(steps) + " steps.")
+
+    def _remove_nodes(self, remove: Set) -> None:
+        """remove nodes in set from graph"""
+        
+        # Unlink marked nodes        
+        for node in remove:
+            if node in self.splitted_graph:
+                for succ in self.splitted_graph[node]:
+                    self.preds[succ].discard(node)
+                    if node in self.preds:
+                        for pred in self.preds[node]:
+                            self.preds[succ].add(pred)
+            if node in self.preds:
+                for pred in self.preds[node]:
+                    self.splitted_graph[pred].discard(node)
+                    if node in self.splitted_graph:
+                        for succ in self.splitted_graph[node]:
+                            self.splitted_graph[pred].add(succ)
+                    
+        # Remove marked nodes
+        for node in remove:
+            if node in self.splitted_graph:                            
+                del self.splitted_graph[node]
+
+        self.nodes.difference_update(remove)                  
+
+    def postprocess(self) -> None:
+        """Postprocess graph to remove dispatcher and redundant nodes"""
+
+        self.nodes = set()
+        self.preds = {}
+        self.node_blocks = {}
+
+        for source in self.splitted_graph:
+            sinks = self.splitted_graph[source]
+            
+            if source not in self.preds:
+                self.preds[source] = set()
+                self.nodes.add(source)
+            for sink in sinks:
+                if sink not in self.preds:
+                    self.preds[sink] = set()
+                self.preds[sink].add(source)
+                self.nodes.add(sink)
+            
+        for node in self.nodes:
+            block = self.asm_cfg.loc_key_to_block(node[0]) 
+            self.node_blocks[node] = [block]
+
+        remove = set()
+
+        # Mark dispatcher nodes for removal
+        for node in self.nodes:
+            if self.asm_cfg.loc_key_to_block(node[0]) is None or node[1] is not None and (node[0].key not in self.node_state or len(self.node_state[node[0].key]) > MAX_STATE_PER_INST):
+                remove.add(node)                
+        self._remove_nodes(remove)
+
+        
+
+        # Merge redundant nodes
+        m = 0
+        change = True
+        while change:
+            change = False
+            remove = set()
+            for node in self.nodes:
+                if node in self.splitted_graph and len(self.splitted_graph[node]) == 1:
+                    succ = next(iter(self.splitted_graph[node]))
+                    if len(self.preds[succ]) == 1:
+                        # Merge code of removed node                   
+                        self.node_blocks[node] += self.node_blocks[succ]
+                        change = True                        
+                        self._remove_nodes(set([succ]))
+                        break
 
     def write_output(self, output_path: str) -> None:
         """Write the state transition graph to a DOT file.
@@ -242,62 +391,35 @@ class Interpreter:
             f.write("    nodesep=0.5;\n")  # Add some horizontal spacing between nodes
             f.write("    ranksep=0.5;\n")  # Add some vertical spacing between ranks
 
-            # First, create a mapping of states to their unique instructions
-            state_to_instrs = {}
-            for instr_offset, states in self.instr_state.items():
-                if len(states) == 1:  # Only include instructions that map to exactly one state
-                    state = next(iter(states))
-                    state_to_instrs.setdefault(hex(state), []).append(instr_offset)
-            
-            # Sort instructions by address for each state
-            for state in state_to_instrs:
-                state_to_instrs[state].sort()
-
-            # Find the maximum line width
-            max_width = 0
-            for state in state_to_instrs:
-                for addr in state_to_instrs[state]:
-                    line = f"0x{hex(addr)[2:].zfill(8)}: {self.instr_disasm[addr]}"
-                    max_width = max(max_width, len(line))
-
             # Write edges
-            for source in self.state_graph:
-                for target in self.state_graph[source]:
-                    f.write(f'    "{source}" -> "{target}";\n')
+            
+            node_label = lambda node : ("loc_key_" + str(node[0].key), "state_" + hex(node[1]) if node[1] is not None else "START")
+            for source in self.splitted_graph:
+                for target in self.splitted_graph[source]:
+                    f.write(f'    "{node_label(source)}" -> "{node_label(target)}";\n')
 
-            def create_html_label(state, instrs):
+            
+            def create_html_label(state, blocks):
                 html = ['<']
                 html.append('<TABLE CELLBORDER="0" CELLSPACING="0">')
-                html.append(f'<TR><TD COLSPAN="2" ALIGN="CENTER"><B>{state}</B></TD></TR>')
-                for addr in instrs:
-                    addr_str = f"0x{hex(addr)[2:].zfill(8)}"
-                    disasm = self.instr_disasm[addr]
-                    html.append(f'<TR><TD ALIGN="RIGHT">{addr_str}:</TD><TD ALIGN="LEFT">{disasm}</TD></TR>')
+                html.append(f'<TR><TD COLSPAN="2" ALIGN="CENTER"><B>{"loc_key_" + str(state[0].key) + ", state="+("START" if state[1] is None else hex(state[1]))}</B></TD></TR>')
+                for block in blocks:
+                    for instr in block.lines:
+                        addr_str = f"0x{hex(instr.offset)[2:].zfill(8)}"
+                        disasm = str(instr)
+                        html.append(f'<TR><TD ALIGN="RIGHT">{addr_str}:</TD><TD ALIGN="LEFT">{disasm}</TD></TR>')
                 html.append('</TABLE>')
                 html.append('>')
                 return ''.join(html)
 
             # Write nodes with instruction information
-            for state in self.state_graph:
-                instrs = state_to_instrs.get(state, [])
-                label = create_html_label(state, instrs)
-                f.write(f'    "{state}" [label={label}];\n')
+            for source in self.nodes:                               
+                label = create_html_label(source, self.node_blocks[source])              
+                f.write(f'    "{node_label(source)}" [label={label}];\n')
 
-            # Add terminal states with double rectangles
-            for terminal_state in self.terminal_states:
-                instrs = state_to_instrs.get(terminal_state, [])
-                label = create_html_label(terminal_state, instrs)
-                f.write(f'    "{terminal_state}" [label={label}, peripheries=1];\n')
-
-            # Add START node with empty instruction lists
-            f.write(f'    "START" [label={create_html_label("START", [])}];\n')
-
-            # Add rank constraints to help balance the layout
-            f.write('    { rank=same; "START" }\n')
             f.write("}\n")
         logging.info("Graph written successfully")
-
-
+            
 def main() -> None:
     """Main entry point for the interpreter."""
     if len(sys.argv) < 3 or len(sys.argv) > 4:
@@ -312,20 +434,19 @@ def main() -> None:
     logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
     logging.info("Starting analysis of %s", binary_path)
 
-    try:
+    try:        
         interpreter = Interpreter(binary_path, function_name)
+        start_time = time.time()
         logging.info("Doing analysis pass 1/2")
         interpreter.prepare(False)
-        interpreter.run()
-        if interpreter.address_score == {}:
-            raise ValueError("Failed to guess dispatch state address")
-        interpreter.dispatch_state_addr = max(interpreter.address_score, key=interpreter.address_score.get)
-        logging.info("Guessed dispatch state address: %s", hex(interpreter.dispatch_state_addr))
+        interpreter.run()                
+        logging.info("Guessed state-split criterion: %s", hex(interpreter.dispatch_state_addr))
         logging.info("Doing analysis pass 2/2")
         interpreter.prepare(True)
         interpreter.run()
+        interpreter.postprocess()
         interpreter.write_output(output_path)
-        logging.info("Analysis completed successfully")
+        logging.info(f"Analysis completed successfully in {time.time() - start_time:.3f} sec(s)")
     except Exception as e:
         logging.error("Analysis failed: %s", str(e))
         traceback.print_exc()

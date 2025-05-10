@@ -158,6 +158,8 @@ class KSetsDomain(object):
                 'CC_EQ': lambda concrete_args: concrete_args[0],   
                 'CC_U>': lambda concrete_args: not(concrete_args[0] or concrete_args[1]), 
                 'CC_S<': lambda concrete_args: concrete_args[0] != concrete_args[1], 
+                'CC_S<=': lambda concrete_args: concrete_args[0] != concrete_args[1] or concrete_args[2], 
+
                 'CC_U<=': lambda concrete_args: concrete_args[0] or concrete_args[1],
                 'CC_U<': lambda concrete_args: concrete_args[0],
 
@@ -172,6 +174,8 @@ class KSetsDomain(object):
                 'parity': lambda concrete_args: bin(concrete_args[0]).count('1') % 2 == 1, 
                 'zeroExt_64': lambda concrete_args: np.uint64(concrete_args[0]),
                 'signExt_64': lambda concrete_args: np.uint64(KSetsDomain._cast_signed(concrete_args[0])),
+                'signExt_128': lambda concrete_args: np.uint128(KSetsDomain._cast_signed(concrete_args[0])),
+
         }   
 
     # ===== Private helper functions =====
@@ -269,9 +273,8 @@ class KSetsDomain(object):
             return TOP
 
     # ===== Expression evaluation =====
-    
-    def lift(self, f: Callable, concrete_args: List[Any], 
-             abs_args: List[Any], 
+    def lift(self, f: Callable, concrete_args: Any, 
+             abs_args: Tuple[Any], 
              f_res_is_abstract: bool = False, evaluate_args: bool = True) -> AbstractValue:
         """Lift a concrete function to work on abstract values."""
         evaluated_args = []
@@ -285,13 +288,13 @@ class KSetsDomain(object):
             evaluated_args.append(KSetsDomain._concretize(eval_arg))
 
         results = BOTTOM
-        for args in [list(t) for t in itertools.product(*evaluated_args)]:
+        for args in itertools.product(*evaluated_args):                        
             r = f(concrete_args, args)
             if not f_res_is_abstract:
                 r = KSetsDomain._abstract(r)
             results = join_val(results, r)
         return results
-
+    
     def _evaluate(self, expr: Expr) -> AbstractValue:
         """Evaluate an expression in this domain."""
         if isinstance(expr, ExprId):
@@ -302,11 +305,11 @@ class KSetsDomain(object):
                 if handler:
                     return handler(concrete_args)
                 else:
-                    raise ValueError(f"Unhandled expr operator: {op}")
+                    raise ValueError(f"Unhandled expr operator: {op}")            
             return self.lift(handle_op, expr.op, expr.args)
         elif isinstance(expr, ExprMem):
             handle_mem = lambda size, concrete_addr: self.read(concrete_addr[0], size)
-            return self.lift(handle_mem, expr.size // 8, [expr.ptr], True)
+            return self.lift(handle_mem, expr.size // 8, (expr.ptr,), True)
         elif isinstance(expr, ExprSlice):
             def handle_slice(slice: Tuple[int, int], sliced: Set[Value]) -> AbstractValue:
                 start, stop = slice
@@ -319,7 +322,7 @@ class KSetsDomain(object):
                     return BITS_TO_NUMPY_TYPE[stop - start](sliced)                            
                 return (int(sliced), stop - start)                
             
-            return self.lift(handle_slice, (expr.start, expr.stop), [expr.arg])
+            return self.lift(handle_slice, (expr.start, expr.stop), (expr.arg, ))
         elif isinstance(expr, ExprInt): 
             if expr.size == 1:
                 return KSetsDomain._abstract([False, True][expr.arg])
@@ -371,21 +374,20 @@ class KSetsDomain(object):
         """Check if a location is incompatible with this domain."""
         return ExprId("IRDst", 64) in self.reg and concrete_loc is not None and concrete_loc not in KSetsDomain._concretize(self.reg[ExprId("IRDst", 64)]) 
                
-    def update(self, ir: AssignBlock) -> Set[Address]:
+    def update(self, ir: AssignBlock) -> None:
         """
         Update this domain with an IR statement.
         
-        Returns a set of strongly-updated addresses for dispatch state variable detection heuristic
         """
         if ir.items() == []:
-            return set()                 
+            return                 
 
         logging.debug("Current abstract state: %s", self)
         update_dict(self.reg, ExprId("IRDst", 64), TOP) #don't care about IRDst except after a jump
         logging.debug("Instruction: %s", ir.instr)
         if "CALL" in str(ir.instr):
             #logging.warning("CALL not implemented yet")            
-            return set()
+            return
         logging.debug("IR statements:")
         for dst, src in ir.items():
             logging.debug("  %s := %s", dst, src)
@@ -402,7 +404,6 @@ class KSetsDomain(object):
         
         #Then, update state
         i = 0
-        strongly_updated_addrs = set()
         for dst, _ in ir.items():
             if isinstance(dst, ExprId): 
                 update_dict(self.reg, dst, abs_vals[i])  
@@ -418,7 +419,6 @@ class KSetsDomain(object):
                     concrete_addrs = KSetsDomain._concretize(abs_write_addrs[i])
                     if len(concrete_addrs) == 1:
                         concrete_addr = next(iter(concrete_addrs))
-                        strongly_updated_addrs.add(concrete_addr)
                         self.strong_update(concrete_addr, abs_vals[i], dst.size >> 3)
                     else:
                         for concrete_addr in concrete_addrs:
@@ -436,14 +436,23 @@ class KSetsDomain(object):
             if self.reg[k] is BOTTOM:
                 logging.debug("Register %s is BOTTOM - setting domain to bottom state", k)
                 self.is_bot = True
-                return set()
+                return
         for k in self.mem:
             if self.mem[k] is BOTTOM:
                 logging.debug("Memory at %s is BOTTOM - setting domain to bottom state", hex(k))
                 self.is_bot = True
-                return set() 
-        return strongly_updated_addrs        
-
+                return 
+        return        
+    
+    def get_static_vars(self) -> Dict[Address, Value]:
+        """Get static variables/values from abstract state"""
+        static_vars = {}
+        for addr in self.mem:
+            abs_val: AbstractValue = self.read(addr, TRACKED_DATA_SIZE)
+            if abs_val is not None and len(abs_val) == 1:
+                static_vars[addr] = next(iter(abs_val))
+        return static_vars
+    
     def __str__(self) -> str:
         """Get a string representation of this domain."""
         def showval(concrete_val: Union[Value, bool, int]) -> str:
