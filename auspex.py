@@ -15,6 +15,7 @@ from utils import TOP, Address, Value, AbstractValue
 from estimator import estimate, Path
 import numpy as np
 from immutabledict import immutabledict
+from miasm.core.graph import DiGraph
 
 # Type aliases for better readability
 DispatchState = Optional[Value]  # None represents TOP
@@ -42,26 +43,13 @@ class Interpreter:
         self.dispatch_state_addr = None
         self.seeing = set()
         self.seen = set()
-        self.loops = set()
-        self._detect_loops(self.entry_block)
+        self.loops = self.ir_cfg.compute_natural_loops(self.entry_block)
+        self.loop_header = next(self.loops)[0][1]
 
-    def _detect_loops(self, root):
-        if root in self.seen:
-            return
-        if root in self.seeing:
-            self.loops.add(root)
-            return
-        self.seeing.add(root)
-        for succ_block in self.ir_cfg.successors_iter(root):
-            self._detect_loops(succ_block)
-        self.seeing.remove(root)
-        self.seen.add(root)
-            
     def prepare(self, state_split: bool) -> None:
         # Dispatch state management
         self.state_split = state_split
-        self.node_state = {}
-        self.loop_header = next(iter(self.loops))
+        self.node_state = {}                
         self.trace = None
         self.samples = []
         self.best = None
@@ -78,8 +66,7 @@ class Interpreter:
         self.iter_freshness = {}
         
         # Initialize graph structures
-        self.state_graph: Graph = {}
-        self.splitted_graph: Graph = {}
+        self.splitted_graph: DiGraph = DiGraph()      
         self.terminal_states: Set[str] = set()   
 
     def _load_binary(self, binary_path: str, function_name: str) -> None:
@@ -153,28 +140,6 @@ class Interpreter:
             
         return input_state, output_state
 
-    def _update_state_graph(self, input_state: AbstractValue, output_state: AbstractValue) -> None:
-        """Update the state transition graph with new edges.
-        
-        Args:
-            input_state: Input dispatch state
-            output_state: Output dispatch state
-        """
-        # Handle transitions from initial state
-        if input_state is TOP:
-            # TOP represents the initial state
-            for target_state in output_state:
-                self.state_graph.setdefault("START", set()).add(hex(target_state))
-        else:       
-            if output_state is TOP:                
-                logging.error("Dispatcher state goes to TOP, increase KSET_MAX")
-                raise ValueError("Dispatcher state goes to TOP, increase KSET_MAX")
-            # Add transitions between states
-            for source_state in input_state:
-                for target_state in output_state:
-                    if target_state != source_state:  # Avoid self-loops
-                        self.state_graph.setdefault(hex(source_state), set()).add(hex(target_state))
-
     def _process_successors(self, current_block: LocKey, abs_state: domain.KSetsDomain, input_state: AbstractValue, output_state: AbstractValue) -> None:
         """Process all successor blocks of the current location.
         
@@ -202,10 +167,8 @@ class Interpreter:
             possible_states: List[DispatchState] = [None] if output_state is TOP else output_state
             for next_state in possible_states:
                 source = (current_block, next(iter(input_state)) if input_state is not None else None)                
-                sink = (succ_block, next_state)
-                if source not in self.splitted_graph:
-                    self.splitted_graph[source] = set()
-                self.splitted_graph[source].add(sink)
+                sink = (succ_block, next_state)            
+                self.splitted_graph.add_uniq_edge(source, sink)
                 self._process_successor_state(succ_block, abs_state, next_state, succ_addr_str)
                 successor_count += 1
 
@@ -293,83 +256,52 @@ class Interpreter:
                     if self._estimate():
                         break
           
-            input_state, output_state = self._process_block(current_block, abs_state)
-            
-            if output_state != input_state:
-                self._update_state_graph(input_state, output_state)
+            input_state, output_state = self._process_block(current_block, abs_state)            
             
             if not abs_state.is_bot:
                 self._process_successors(current_block, abs_state, input_state, output_state)
         logging.info("Abstract interpretation converged in " + str(steps) + " steps.")
 
     def _remove_nodes(self, remove: Set) -> None:
-        """remove nodes in set from graph"""
+        """Remove nodes in set from graph"""        
         
-        # Unlink marked nodes        
         for node in remove:
-            if node in self.splitted_graph:
-                for succ in self.splitted_graph[node]:
-                    self.preds[succ].discard(node)
-                    if node in self.preds:
-                        for pred in self.preds[node]:
-                            self.preds[succ].add(pred)
-            if node in self.preds:
-                for pred in self.preds[node]:
-                    self.splitted_graph[pred].discard(node)
-                    if node in self.splitted_graph:
-                        for succ in self.splitted_graph[node]:
-                            self.splitted_graph[pred].add(succ)
-                    
-        # Remove marked nodes
-        for node in remove:
-            if node in self.splitted_graph:                            
-                del self.splitted_graph[node]
+            bypass_edges = set()
+            # Bypass node
+            for succ in self.splitted_graph.successors_iter(node):
+                for pred in self.splitted_graph.predecessors_iter(node):
+                        bypass_edges.add((pred, succ))
 
-        self.nodes.difference_update(remove)                  
+            for (pred, succ) in bypass_edges:
+                self.splitted_graph.add_edge(pred, succ)           
 
+            # Remove node
+            self.splitted_graph.del_node(node)
+               
     def postprocess(self) -> None:
         """Postprocess graph to remove dispatcher and redundant nodes"""
-
-        self.nodes = set()
-        self.preds = {}
         self.node_blocks = {}
-
-        for source in self.splitted_graph:
-            sinks = self.splitted_graph[source]
-            
-            if source not in self.preds:
-                self.preds[source] = set()
-                self.nodes.add(source)
-            for sink in sinks:
-                if sink not in self.preds:
-                    self.preds[sink] = set()
-                self.preds[sink].add(source)
-                self.nodes.add(sink)
-            
-        for node in self.nodes:
+        for node in self.splitted_graph.nodes():
             block = self.asm_cfg.loc_key_to_block(node[0]) 
             self.node_blocks[node] = [block]
 
+        # Remove dispatcher nodes
         remove = set()
-
-        # Mark dispatcher nodes for removal
-        for node in self.nodes:
+        for node in self.splitted_graph.nodes():
             if self.asm_cfg.loc_key_to_block(node[0]) is None or node[1] is not None and (node[0].key not in self.node_state or len(self.node_state[node[0].key]) > MAX_STATE_PER_INST):
-                remove.add(node)                
-        self._remove_nodes(remove)
-
-        
-
+                remove.add(node) 
+        self._remove_nodes(remove)      
+            
         # Merge redundant nodes
         m = 0
         change = True
         while change:
             change = False
             remove = set()
-            for node in self.nodes:
-                if node in self.splitted_graph and len(self.splitted_graph[node]) == 1:
-                    succ = next(iter(self.splitted_graph[node]))
-                    if len(self.preds[succ]) == 1:
+            for node in self.splitted_graph.nodes():
+                if len(self.splitted_graph.successors(node)) == 1:
+                    succ = next(self.splitted_graph.successors_iter(node))
+                    if len(self.splitted_graph.predecessors(succ)) == 1:
                         # Merge code of removed node                   
                         self.node_blocks[node] += self.node_blocks[succ]
                         change = True                        
@@ -394,11 +326,10 @@ class Interpreter:
             # Write edges
             
             node_label = lambda node : ("loc_key_" + str(node[0].key), "state_" + hex(node[1]) if node[1] is not None else "START")
-            for source in self.splitted_graph:
-                for target in self.splitted_graph[source]:
+            for source in self.splitted_graph.nodes():
+                for target in self.splitted_graph.successors_iter(source):
                     f.write(f'    "{node_label(source)}" -> "{node_label(target)}";\n')
-
-            
+     
             def create_html_label(state, blocks):
                 html = ['<']
                 html.append('<TABLE CELLBORDER="0" CELLSPACING="0">')
@@ -413,7 +344,7 @@ class Interpreter:
                 return ''.join(html)
 
             # Write nodes with instruction information
-            for source in self.nodes:                               
+            for source in self.splitted_graph.nodes():                               
                 label = create_html_label(source, self.node_blocks[source])              
                 f.write(f'    "{node_label(source)}" [label={label}];\n')
 
