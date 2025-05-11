@@ -171,4 +171,6 @@ Contributions are welcome! Please:
 ## Acknowledgments
 
 - Based on abstract interpretation concepts from Cousot & Cousot
+- Inspired by the "Value-guided partitioning" by Xavier Rival et al. (TOPLAS'07)
 - Uses the Miasm framework for binary analysis 
+
