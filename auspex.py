@@ -67,7 +67,6 @@ class Interpreter:
         
         # Initialize graph structures
         self.splitted_graph: DiGraph = DiGraph()      
-        self.terminal_states: Set[str] = set()   
 
     def _load_binary(self, binary_path: str, function_name: str) -> None:
         """Load and prepare the binary for analysis.
@@ -134,10 +133,6 @@ class Interpreter:
         logging.debug("Output dispatch state: %s", 
                      str([hex(val) for val in output_state]) if output_state is not TOP else "TOP")
         
-        # If this is a terminal block, mark its states as terminal
-        if not list(self.ir_cfg.successors_iter(current_block)) and output_state is not TOP:
-            self.terminal_states.update(hex(val) for val in output_state)
-            
         return input_state, output_state
 
     def _process_successors(self, current_block: LocKey, abs_state: domain.KSetsDomain, input_state: AbstractValue, output_state: AbstractValue) -> None:
